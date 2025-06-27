@@ -1,1 +1,11 @@
-.env
+api_key.json
+*.json
+*.txt
+*.xlsx
+*.zip
+*.csv
+*.bin
+*.model
+*.pkl
+*.pt
+*.env
