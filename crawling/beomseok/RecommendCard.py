@@ -13,10 +13,12 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import Chroma
 from textwrap import dedent
 
 import torch
+import chromadb
+import chromadb.config
 
 
 @dataclass  # 카드 필터링 조건을 저장하는 데이터 클래스
@@ -34,7 +36,7 @@ class ModelManager:  # 임베딩/LLM/DB 등 모델 및 벡터스토어 관리 �
     def __init__(self):
         self.embedding_model: Optional[HuggingFaceEmbeddings] = None
         self.llm: Optional[ChatOpenAI] = None
-        self.db: Optional[FAISS] = None
+        self.db: Optional[Chroma] = None
         self.retriever = None
     
     def initialize_embedding_model(self) -> None:
@@ -61,24 +63,28 @@ class ModelManager:  # 임베딩/LLM/DB 등 모델 및 벡터스토어 관리 �
             print(f"OpenAI 모델 로딩 실패: {e}")
             raise
     
-    def load_faiss_database(self) -> None:
-        """FAISS 데이터베이스 로딩"""
+    def load_chroma_database(self) -> None:
+        """Chroma 데이터베이스 로딩"""
         if not self.embedding_model:
             raise ValueError("임베딩 모델이 초기화되지 않았습니다.")
         
         script_dir = Path(__file__).parent
-        persist_dir = script_dir / "faiss_card_db"
+        persist_dir = script_dir / "chroma_card_db"
         
         try:
-            self.db = FAISS.load_local(
-                str(persist_dir), 
-                self.embedding_model, 
-                allow_dangerous_deserialization=True
+            client_settings = chromadb.config.Settings(
+                anonymized_telemetry=True,  # telemetry를 비활성화하지 않고 기본값으로 설정
+                persist_directory=str(persist_dir)
+            )
+            self.db = Chroma(
+                persist_directory=str(persist_dir),
+                embedding_function=self.embedding_model,
+                client_settings=client_settings
             )
             self.retriever = self.db.as_retriever(search_kwargs={"k": 5})
-            print("FAISS DB 로딩 완료")
+            print("Chroma DB 로딩 완료")
         except Exception as e:
-            print(f"FAISS DB 로딩 실패: {e}")
+            print(f"Chroma DB 로딩 실패: {e}")
             print(f"시도한 경로: {persist_dir}")
             print("임베딩을 먼저 실행하세요.")
             raise
@@ -315,7 +321,7 @@ class CardRecommendationSystem:  # 카드 추천 시스템 전체 RAG 체인 관
         # 모델 초기화
         self.model_manager.initialize_embedding_model()
         self.model_manager.initialize_llm()
-        self.model_manager.load_faiss_database()
+        self.model_manager.load_chroma_database()
         
         # RAG 체인 구성
         self._build_rag_chain()

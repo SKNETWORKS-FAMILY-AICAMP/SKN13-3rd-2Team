@@ -5,17 +5,22 @@ from typing import List, Dict, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 from dotenv import load_dotenv
+import warnings
 
-from langchain.schema import Document
-from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_core.documents import Document
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
+import chromadb.config
+
+warnings.filterwarnings("ignore")
+logging.getLogger("chromadb").setLevel(logging.ERROR)
 
 
 @dataclass  # 임베딩 관련 설정값을 저장하는 데이터 클래스
 class EmbeddingConfig:
     """임베딩 설정 클래스"""
     card_folder: str = str((Path(__file__).parent / "cards").resolve())
-    faiss_persist_dir: str = str((Path(__file__).parent / "faiss_card_db").resolve())
+    chroma_persist_dir: str = str((Path(__file__).parent / "chroma_card_db").resolve())
     embedding_model_name: str = "BM-K/KoSimCSE-roberta-multitask"
     batch_size: int = 32
     progress_interval: int = 10
@@ -28,6 +33,7 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
         self.config = config
         self.logger = self._setup_logger()
         self.embedding_model = None
+        self.db = None
     
     def _setup_logger(self) -> logging.Logger:
         """로거 설정"""
@@ -144,18 +150,23 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
             
             documents.append(Document(page_content=benefit_content, metadata=benefit_metadata))
         
-        # 유의사항들을 개별 Document로 생성
-        for i, caution in enumerate(card_data.get("cautions", [])):
-            if caution.strip():  # 빈 문자열이 아닌 경우만
+        # 유의사항들을 개별 Document로 생성 (복수형 cautions 또는 단수형 caution 모두 지원)
+        cautions = card_data.get("cautions", [])
+        caution_single = card_data.get("caution", [])
+        if isinstance(caution_single, str):
+            caution_single = [caution_single]
+        elif not isinstance(caution_single, list):
+            caution_single = []
+        all_cautions = list(cautions) + list(caution_single)
+        for i, caution in enumerate(all_cautions):
+            if isinstance(caution, str) and caution.strip():  # 빈 문자열이 아닌 경우만
                 caution_content = f"[유의사항] {caution}"
-                
                 caution_metadata = base_metadata.copy()
                 caution_metadata.update({
                     "content_type": "caution",
                     "caution_index": i,
                     "caution_text": caution
                 })
-                
                 documents.append(Document(page_content=caution_content, metadata=caution_metadata))
         
         return documents
@@ -180,7 +191,14 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
                     
                     # 혜택과 유의사항 개수 계산
                     benefits_count = len(card_data.get("benefits", []))
-                    cautions_count = len([c for c in card_data.get("cautions", []) if c.strip()])
+                    cautions = card_data.get("cautions", [])
+                    caution_single = card_data.get("caution", [])
+                    if isinstance(caution_single, str):
+                        caution_single = [caution_single]
+                    elif not isinstance(caution_single, list):
+                        caution_single = []
+                    all_cautions = list(cautions) + list(caution_single)
+                    cautions_count = len([c for c in all_cautions if isinstance(c, str) and c.strip()])
                     stats["total_benefits"] += benefits_count
                     stats["total_cautions"] += cautions_count
                 
@@ -203,8 +221,8 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
         self.logger.info(f"총 유의사항 개수: {stats['total_cautions']}개")
         return documents, stats
     
-    def save_to_faiss_db(self, documents: List[Document]) -> bool:
-        """FAISS DB에 저장"""
+    def save_to_chroma_db(self, documents: List[Document]) -> bool:
+        """Chroma DB에 저장"""
         if not documents:
             self.logger.warning("저장할 문서가 없습니다.")
             return False
@@ -213,42 +231,69 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
             self.logger.error("임베딩 모델이 초기화되지 않았습니다.")
             return False
         
-        self.logger.info("=== FAISS DB 저장 시작 ===")
+        self.logger.info("=== Chroma DB 저장 시작 ===")
         self.logger.info(f"저장할 문서 수: {len(documents)}개")
-        self.logger.info(f"저장 경로: {self.config.faiss_persist_dir}")
+        self.logger.info(f"저장 경로: {self.config.chroma_persist_dir}")
         
         try:
             # 기존 DB가 있다면 삭제 (충돌 방지)
             import shutil
-            if os.path.exists(self.config.faiss_persist_dir):
-                self.logger.info("기존 FAISS DB 삭제 중...")
-                shutil.rmtree(self.config.faiss_persist_dir)
+            if os.path.exists(self.config.chroma_persist_dir):
+                self.logger.info("기존 Chroma DB 삭제 중...")
+                shutil.rmtree(self.config.chroma_persist_dir)
             
-            self.logger.info("새로운 FAISS DB 생성 중...")
-            db = FAISS.from_documents(
-                documents=documents,
-                embedding=self.embedding_model
+            self.logger.info("새로운 Chroma DB 생성 중...")
+            # telemetry 완전 비활성화 및 경로/권한 체크
+            persist_dir = self.config.chroma_persist_dir
+            os.makedirs(persist_dir, exist_ok=True)
+            client_settings = chromadb.config.Settings(
+                anonymized_telemetry=False,
+                persist_directory=persist_dir
             )
             
-            self.logger.info("FAISS DB 저장 중...")
-            db.save_local(self.config.faiss_persist_dir)
+            # documents, embedding_function 상태 로그
+            self.logger.info(f"저장할 문서 수: {len(documents)}")
+            self.logger.info(f"임베딩 모델: {self.embedding_model} (type: {type(self.embedding_model)})")
+            if len(documents) > 0:
+                self.logger.info(f"documents 샘플: {repr(documents[0])}")
+            else:
+                self.logger.error("documents가 비어 있습니다! 데이터 생성/수집 파이프라인을 점검하세요.")
             
-            # 저장 검증
-            try:
-                # FAISS는 저장된 파일의 존재 여부로 검증
-                index_file = os.path.join(self.config.faiss_persist_dir, "index.faiss")
-                if os.path.exists(index_file):
-                    self.logger.info("모든 문서가 성공적으로 저장되었습니다!")
-                else:
-                    self.logger.warning("경고: FAISS 인덱스 파일이 생성되지 않았습니다.")
-            except Exception as count_error:
-                self.logger.warning(f"저장 검증 실패: {count_error}")
-                self.logger.info("FAISS DB 저장은 완료되었습니다.")
+            empty_docs = [doc for doc in documents if not getattr(doc, 'page_content', '').strip()]
+            self.logger.info(f"page_content가 비어 있는 문서 수: {len(empty_docs)}")
+            if empty_docs:
+                self.logger.info(f"비어 있는 문서 샘플: {repr(empty_docs[0])}")
+            
+            self.db = Chroma.from_documents(
+                documents=documents,
+                embedding=self.embedding_model,
+                persist_directory=persist_dir,
+                client_settings=client_settings
+            )
+            self.db.persist()
+            
+            self.logger.info("Chroma DB 저장 중...")
+            # Chroma 주요 파일이 생성되었는지 확인 (예: chroma.sqlite3)
+            db_file = os.path.join(persist_dir, "chroma.parquet")
+            if os.path.exists(db_file):
+                self.logger.info(f"Chroma DB 파일이 정상적으로 생성됨: {db_file}")
+            else:
+                # chroma.sqlite3가 없을 경우, chroma.sqlite, chroma-collections.parquet 등 다른 파일도 체크
+                alt_files = ["chroma.sqlite", "chroma-collections.parquet", "chroma-embeddings.parquet"]
+                found = False
+                for fname in alt_files:
+                    fpath = os.path.join(persist_dir, fname)
+                    if os.path.exists(fpath):
+                        self.logger.info(f"Chroma DB 파일이 정상적으로 생성됨: {fpath}")
+                        found = True
+                if not found:
+                    self.logger.error(f"경고: Chroma DB 관련 파일이 생성되지 않았습니다. 경로/권한/설정 확인 필요: {persist_dir}")
             
             return True
             
         except Exception as e:
-            self.logger.error(f"FAISS DB 저장 실패: {e}")
+            import traceback
+            self.logger.error(f"Chroma DB 저장 실패: {e}\n{traceback.format_exc()}")
             return False
     
     def run(self) -> bool:
@@ -265,7 +310,7 @@ class CardEmbeddingProcessor:  # 카드 JSON → 벡터 임베딩 및 FAISS DB �
                 return False
             
             documents, stats = self.process_json_files(json_files)
-            success = self.save_to_faiss_db(documents)
+            success = self.save_to_chroma_db(documents)
             
             self.logger.info("=== 전체 프로세스 완료 ===")
             return success
