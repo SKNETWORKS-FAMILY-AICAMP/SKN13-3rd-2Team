@@ -177,7 +177,7 @@ RAG 시스템의 성능은 다음과 같은 주요 평가 지표로 측정합니
 - **컨텍스트 정밀도 (context_precision)**: 검색된 컨텍스트 중 실제로 정답에 필요한 정보만을 얼마나 정확히 포함하고 있는지 평가합니다. 1.0에 가까울수록 불필요한 정보 없이 정확함을 의미합니다.
 - **의미 유사도 (semantic_similarity)**: 생성된 답변과 정답(근거) 간의 의미적 유사도를 측정합니다. 값이 높을수록 두 텍스트가 의미적으로 비슷함을 의미합니다.
 
-#### 최신 RAGAS 평가 결과 (2025년 6월 기준)
+#### 최신 RAGAS 평가 결과  
 
 **평가 환경:**
 - 평가 방법: RAGAS (RAG Assessment) 프레임워크
@@ -235,3 +235,55 @@ RAG 시스템의 성능은 다음과 같은 주요 평가 지표로 측정합니
 현재 시스템은 실사용에 충분한 수준의 성능을 보이며, 특히 정보 검색과 의미적 일관성 측면에서 우수한 성능을 발휘합니다. 다만, 더 정확한 근거 기반 답변을 위해 위의 개선 방안을 단계적으로 적용할 것을 권장합니다.
 
 ---
+
+```mermaid
+
+flowchart LR
+    A[크롤링<br>CreditCardCrawling.py] --> B[카드 JSON 저장<br>카드고릴라에서 수집]
+    B --> C[임베딩 처리<br>EmbeddingCardInfo.py]
+    C --> D[FAISS DB 생성<br>카드 혜택/유의사항 기반]
+
+    D --> E[카드 추천 시스템 초기화<br>RecommendCard.py]
+    E --> F[사용자 쿼리 입력]
+    F --> G[유사도 기반 검색<br>FAISS]
+    G --> H[카드 필터링<br>브랜드/연회비 등]
+    H --> I[카드 문서 포맷팅]
+    I --> J[프롬프트 구성<br>PromptBuilder]
+    J --> K[LLM 응답 생성<br>ChatGPT API]
+    K --> L[추천 결과 출력<br>Top 3 카드]
+
+    style A fill:#dfefff,stroke:#0077cc
+    style C fill:#dfffdc,stroke:#339933
+    style E fill:#ffe4e4,stroke:#cc0000
+    style K fill:#fff2cc,stroke:#ffaa00
+```
+<<<<<<< HEAD
+=======
+
+```mermaid
+flowchart TD
+
+%% 상단 흐름
+subgraph 단계1[🧩 Input & Vector Search]
+    direction LR
+    A[Start:\nRunnablePassthrough] --> B{{Split Input}}
+    B --> B1[query:\nRunnablePassthrough]
+    B --> B2[vector:\nexpand_and_embed]
+    B1 & B2 --> C[RunnableMap:\nquery: x.query,\ncards: search_similar_cards_with_filter]
+end
+
+%% 하단 흐름
+subgraph 단계2[🧠 Prompt & LLM Inference]
+    direction LR
+      D[RunnableMap:\ncards_block: format_cards x.cards]
+      E[RunnableLambda:\nmake_prompt x]
+      F[LLM\n e.g., GPT-4]
+      G[Output Parser]
+      H[Final Output]
+    D --> E --> F --> G --> H
+end
+
+C --> D
+
+```
+>>>>>>> main
